@@ -1,0 +1,34 @@
+{
+  "checkedAt": "2026-11-20T05:19:43.108Z",
+  "results": {
+    "food_initialize_no_auth": {
+      "status": 401,
+      "contentType": "application/json",
+      "body": "{\"error\": \"invalid_token\", \"error_description\": \"Authentication required\"}"
+    },
+    "food_tools_list_no_auth": {
+      "status": 401,
+      "contentType": "application/json",
+      "body": "{\"error\": \"invalid_token\", \"error_description\": \"Authentication required\"}"
+    },
+    "dineout_initialize_no_auth": {
+      "status": 401,
+      "contentType": "application/json",
+      "body": "{\"error\": \"invalid_token\", \"error_description\": \"Authentication required\"}"
+    },
+    "oauth_metadata": {
+      "status": 200,
+      "body": "{\"issuer\":\"https://mcp.swiggy.com/auth\",\"authorization_endpoint\":\"https://mcp.swiggy.com/auth/authorize\",\"token_endpoint\":\"https://mcp.swiggy.com/auth/token\",\"registration_endpoint\":\"https://mcp.swiggy.com/auth/register\",\"scopes_supported\":[\"mcp:tools\",\"mcp:resources\",\"mcp:prompts\"],\"response_types_supported\":[\"code\"],\"grant_types_supported\":[\"authorization_code\",\"refresh_token\"],\"code_challenge_methods_supported\":[\"S256\"],\"token_endpoint_auth_methods_supported\":[\"none\",\"client_secret_post\",\"cli"
+    },
+    "dynamic_client_registration": {
+      "status": 201,
+      "client_id": "swiggy-mcp",
+      "rawHead": "{\"client_id\":\"swiggy-mcp\",\"client_name\":\"Setuware AI Commerce Assistant\",\"redirect_uris\":[\"http://localhost:3000/auth/callback\"],\"grant_types\":[\"authorization_code\",\"refresh_token\"],\"response_types\":["
+    },
+    "authorize_url_generated": {
+      "ok": true,
+      "url": "https://mcp.swiggy.com/auth/authorize?response_type=code&client_id=swiggy-mcp&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fauth%2Fcallback&code_challenge=adI7WbyaRoQ9rkRhNFhHXsjpcthaIkxDADyZUmganWM&code_challenge_method=S256&state=BOH8vAev-hQ3ZnPsSS7y6A&scope=mcp%3Atools",
+      "note": "Generated only — NOT visited. Satyam completes phone + OTP in the browser."
+    }
+  }
+}

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setuware AI Commerce Assistant — live Swiggy MCP demo</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <strong>Setuware AI Commerce Assistant</strong>
+    <span class="sub">Food delivery + table booking on live Swiggy MCP — no mock data</span>
+  </div>
+  <div class="auth" id="authBox">
+    <span id="authState" class="pill">Checking sign-in…</span>
+    <button id="authBtn" class="btn primary" hidden>Sign in with Swiggy</button>
+    <button id="logoutBtn" class="btn" hidden>Sign out</button>
+  </div>
+</header>
+
+<div class="location-bar" id="locationBar">
+  <span id="locationLabel">📍 No location set — search needs one.</span>
+  <button id="geoBtn" class="btn small">Use my location</button>
+  <select id="addressSelect" hidden></select>
+  <button id="cartBtn" class="btn small">View my cart</button>
+</div>
+
+<main>
+  <section class="chat-col">
+    <div id="chat" class="chat"></div>
+    <form id="chatForm" class="chat-form">
+      <input id="chatInput" type="text" autocomplete="off"
+        placeholder="Try: biryani near me · veg pizza · book a table for 2 tonight">
+      <button type="submit" class="btn primary">Send</button>
+    </form>
+    <p class="hint">Every reply comes from the live Swiggy MCP servers — sign in first, then
+    search works end to end. Adding to cart or booking a table always asks you
+    first — nothing mutates silently. Orders are never placed from this demo;
+    it stops at the confirmed cart.</p>
+  </section>
+
+  <aside class="log-col">
+    <h2>🔍 Live MCP tool calls</h2>
+    <p class="log-sub">Every real tool call this app makes, with its arguments — this is what
+    Swiggy asked to see in the demo.</p>
+    <div id="toolLog" class="tool-log"><p class="empty">No calls yet. Send a message to start.</p></div>
+    <button id="clearLogBtn" class="btn small">Clear log</button>
+  </aside>
+</main>
+
+<!-- Confirmation modal: shown before ANY mutation (add to cart / book table) -->
+<div id="confirmModal" class="modal" hidden>
+  <div class="modal-card">
+    <h3 id="confirmTitle">Confirm</h3>
+    <div id="confirmBody"></div>
+    <div class="modal-actions">
+      <button id="confirmYes" class="btn primary">Yes, confirm</button>
+      <button id="confirmNo" class="btn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
