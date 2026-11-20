@@ -322,6 +322,6 @@ $("clearLogBtn").onclick = () => { toolLogEl.innerHTML = '<p class="empty">Log c
 
 refreshStatus();
 if (new URLSearchParams(location.search).get("auth") === "ok") {
-  addMsg("✅ Signed in with Swiggy — your token is stored locally only. Try 'biryani near me'.", "sys");
+  addMsg("✅ Signed in with Swiggy — your token stays in this browser only. Try 'biryani near me'.", "sys");
 }
 addMsg("Hi! I'm the Setuware AI Commerce Assistant, running on live Swiggy MCP. Sign in with Swiggy (top-right), then ask me for food ('biryani near me') or a table ('book a table for 2 tonight'). Everything I show comes from Swiggy's real servers — nothing here is mocked.", "bot");

@@ -32,6 +32,33 @@ npm install   # zero dependencies — Node 18+ built-ins only
 npm start     # http://localhost:3000
 ```
 
+## Deploy it (Vercel, public URL)
+
+No env vars are required — the app derives its public URL per request
+from the proxy headers, so the OAuth redirect URI is automatic.
+
+1. In Vercel: **Add New → Project → Import** this repo
+   (`stymrj/setuware-ai-commerce-assistant`).
+2. Framework Preset: **Other**. Build Command: leave empty (or `npm install`).
+   Output Directory: leave empty.
+3. Deploy. The URL will be `https://setuware-ai-commerce-assistant.vercel.app`
+   (or the domain Vercel assigns).
+4. Open the URL, click **Sign in with Swiggy** — phone + OTP in Swiggy's
+   own page — and record the demo from there. No local clone or `npm`
+   needed.
+
+Optional env vars in the Vercel dashboard (all optional):
+`GEMINI_API_KEY` or `OPENAI_API_KEY` (LLM routing instead of the keyword
+router), `BASE_URL` (only if the derived URL is ever wrong — it overrides
+the per-request derivation).
+
+How tokens work on Vercel: the OAuth callback sets an HttpOnly, Secure,
+SameSite=Lax cookie (`sca_tokens`, 30-day Max-Age) holding only the token
+set — no shared disk, no database, any serverless instance can serve any
+request. The PKCE verifier rides a second short-lived cookie (`sca_oauth`,
+10 min, callback path only). On localhost the old behaviour is unchanged:
+tokens stay in `.swiggy-tokens.json` (mode 0600, gitignored).
+
 Optional LLM routing (the LLM only picks the tool — commerce data always
 comes from the live MCP server):
 
@@ -51,10 +78,12 @@ Click **Sign in with Swiggy** (top-right). The flow is OAuth 2.1 + PKCE:
 2. Your browser goes to `https://mcp.swiggy.com/auth/authorize` where you
    complete **phone + OTP in Swiggy's own page**. This app never sees or
    handles your phone number or OTP.
-3. The callback (`http://localhost:3000/auth/callback`) exchanges the code
-   for tokens (`POST /auth/token`). Access token lasts 5 days; the app
-   refreshes it automatically (`grant_type=refresh_token`, 30-day tokens).
-4. Tokens live only in `.swiggy-tokens.json` (mode 0600, gitignored).
+3. The callback (`/auth/callback`) exchanges the code for tokens
+   (`POST /auth/token`). Access token lasts 5 days; the app refreshes it
+   automatically (`grant_type=refresh_token`, 30-day tokens).
+4. Tokens live in an HttpOnly Secure cookie on a public URL, or in
+   `.swiggy-tokens.json` (mode 0600, gitignored) on localhost — see
+   "Deploy it (Vercel, public URL)" above.
 
 **Verified live 2026-11-20:** `initialize` without a Bearer token returns
 `HTTP 401 {"error":"invalid_token","error_description":"Authentication required"}`
@@ -66,7 +95,7 @@ mid-call. See `verification/live-check.json` for the recorded responses.
 
 | Shot | Time | What to show |
 | --- | --- | --- |
-| 1. Surface | 0:00–0:30 | The chat UI at localhost:3000; sign-in state visible |
+| 1. Surface | 0:00–0:30 | The chat UI at the public URL (or localhost:3000); sign-in state visible |
 | 2. Discovery | 0:30–2:00 | `biryani near me` → watch the tool-call log fill with `search_restaurants` + `search_menu` (real args visible), restaurant + dish cards from live data |
 | 3. Cart | 2:00–3:30 | Tap a dish → **Add to cart** → confirmation card → Confirm → `update_food_cart` + `get_food_cart` appear in the log, cart shown with live total |
 | 4. Action step | 3:30–4:30 | `book a table for 2 tonight` → `search_restaurants_dineout` → pick a place → `get_available_slots` → pick a slot → Confirm → `book_table` (free deal) |
@@ -113,11 +142,13 @@ never retried; Builders Club orders pay by COD with a hard ₹1000 cart cap.
 
 ```
 server.js            # HTTP server, API routes, OAuth callback, safety rails
+api/index.js         # Vercel serverless entry — same handler as server.js
+vercel.json          # rewrites every route to api/index.js, 60s maxDuration
 lib/mcp.js           # Streamable-HTTP JSON-RPC client (JSON + SSE parsing)
-lib/auth.js          # OAuth 2.1 + PKCE, DCR, token exchange/refresh, local store
+lib/auth.js          # OAuth 2.1 + PKCE, DCR, token exchange/refresh, cookie + file stores
 lib/router.js        # keyword router + optional LLM router (read-only tools only)
 public/              # index.html, app.js, style.css — chat UI + tool-call log
-test/                # node:test suite (mock MCP server; no live calls)
+test/                # node:test suite (mock MCP server + router + Vercel path; no live calls)
 scripts/verify-live.mjs  # live endpoint check (no auth, no mutations)
 verification/live-check.json  # recorded live responses
 ```
@@ -125,7 +156,7 @@ verification/live-check.json  # recorded live responses
 ## Tests & verification
 
 ```bash
-npm test          # 14 tests, all passing (mock MCP server + router)
+npm test          # 21 tests, all passing (mock MCP server + router + Vercel/cookie path)
 npm run verify-live  # real endpoints: 401s without auth, DCR 201, authorize URL generated
 ```
 
@@ -138,6 +169,11 @@ npm run verify-live  # real endpoints: 401s without auth, DCR 201, authorize URL
   sign-in the food flows use the saved address instead.
 - Paid dineout deals need the UPI QR step in your own UPI app; the booking
   confirms only after you pay there.
-- This is a localhost demo (single user, in-memory session state). It is
-  not production-hardened — see the Ship-to-production doc before going
-  further.
+- This is a single-user demo (in-memory location / last-results / tool
+  log per instance). The UI sends its location with every chat message
+  and renders tool calls from each response inline, so a cold Vercel
+  instance loses nothing the demo needs — except the `/api/tool-log`
+  history endpoint, which is per-instance. Tokens are stateless (cookie);
+  location and log are not shared across instances.
+- On Vercel the function timeout is 60s (`vercel.json`); a slow MCP call
+  past that returns a 500 to the browser — retry the message.
