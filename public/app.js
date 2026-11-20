@@ -113,6 +113,12 @@ function askConfirm(title, bodyHtml) {
 }
 $("confirmYes").onclick = () => { $("confirmModal").hidden = true; pendingConfirm?.(true); pendingConfirm = null; };
 $("confirmNo").onclick = () => { $("confirmModal").hidden = true; pendingConfirm?.(false); pendingConfirm = null; };
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("confirmModal").hidden) $("confirmNo").onclick();
+});
+$("confirmModal").addEventListener("click", (e) => {
+  if (e.target === $("confirmModal")) $("confirmNo").onclick();
+});
 
 // --- chat ---
 $("chatForm").addEventListener("submit", async (e) => {
