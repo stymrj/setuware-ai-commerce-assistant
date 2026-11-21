@@ -107,6 +107,8 @@ test("deriveBaseUrl prefers BASE_URL, then forwarded headers, then Host", () => 
     "https://demo.vercel.app"
   );
   assert.equal(deriveBaseUrl(req({ host: "localhost:3000" })), "http://localhost:3000");
+  assert.equal(deriveBaseUrl(req({ host: "127.0.0.1:3000" })), "http://localhost:3000");
+  assert.equal(deriveBaseUrl(req({ host: "[::1]:3010" })), "http://localhost:3010");
 
   process.env.BASE_URL = "https://example.com/";
   try {

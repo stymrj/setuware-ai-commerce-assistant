@@ -8,7 +8,10 @@ const $ = (id) => document.getElementById(id);
 const chatEl = $("chat"), toolLogEl = $("toolLog"), inputEl = $("chatInput");
 
 let authed = false;
-let location = null; // { addressId?, latitude?, longitude?, label? }
+// Not named `location`: a top-level `let location` is a SyntaxError in the
+// browser because it clashes with window.location, and the whole script
+// then fails to parse (sign-in button stays hidden).
+let savedPlace = null; // { addressId?, latitude?, longitude?, label? }
 let lastDishes = []; // dishes from the latest search, keyed for Add buttons
 let pendingConfirm = null; // { kind, payload } resolved by the modal
 
@@ -73,11 +76,12 @@ async function refreshStatus() {
     $("authBtn").hidden = false;
     $("logoutBtn").hidden = true;
   }
-  if (json.location) { location = json.location; updateLocationLabel(); }
+  if (json.location) { savedPlace = json.location; updateLocationLabel(); }
 }
 
 async function loadAddresses() {
   const { res, json } = await api("/api/addresses");
+  if (json.toolCalls) renderToolLog(json.toolCalls);
   if (!res.ok) return;
   const sel = $("addressSelect");
   const addresses = json.addresses || [];
@@ -91,22 +95,26 @@ async function loadAddresses() {
 }
 
 function setLocation(loc) {
-  location = loc;
+  savedPlace = loc;
   updateLocationLabel();
   if (loc) api("/api/location", loc);
 }
 
 function updateLocationLabel() {
-  $("locationLabel").textContent = location
-    ? `📍 ${location.label || (location.addressId ? "Saved address " + location.addressId : `${location.latitude}, ${location.longitude}`)}`
+  $("locationLabel").textContent = savedPlace
+    ? `📍 ${savedPlace.label || (savedPlace.addressId ? "Saved address " + savedPlace.addressId : `${savedPlace.latitude}, ${savedPlace.longitude}`)}`
     : "📍 No location set — search needs one.";
 }
 
 // --- confirmation modal (the gate before every mutation) ---
-function askConfirm(title, bodyHtml) {
+// Nothing in this file calls update_food_cart, book_table, or create_cart
+// until askConfirm resolves true. Cancel and Escape resolve false and return
+// before fetch. The server also rejects those routes unless confirmed:true.
+function askConfirm(title, bodyHtml, yesLabel) {
   return new Promise((resolve) => {
     $("confirmTitle").textContent = title;
     $("confirmBody").innerHTML = bodyHtml;
+    $("confirmYes").textContent = yesLabel || "Yes, confirm";
     $("confirmModal").hidden = false;
     pendingConfirm = resolve;
   });
@@ -127,7 +135,7 @@ $("chatForm").addEventListener("submit", async (e) => {
   if (!text) return;
   inputEl.value = "";
   addMsg(text, "user");
-  const { json } = await api("/api/chat", { message: text, location });
+  const { json } = await api("/api/chat", { message: text, location: savedPlace });
   if (json.toolCalls) renderToolLog(json.toolCalls);
   if (json.ok === false) { addMsg("⚠️ " + (json.message || "Something went wrong."), "sys"); return; }
   if (json.reply) addMsg(json.reply, "bot");
@@ -207,8 +215,11 @@ async function showMenu(restaurantId, restaurantName) {
   const { json } = await api("/api/menu", { restaurantId });
   if (json.toolCalls) renderToolLog(json.toolCalls);
   if (!json.ok) { addMsg("⚠️ " + (json.message || "Could not load the menu."), "sys"); return; }
-  const cats = json.data?.categories || [];
-  const items = cats.flatMap((c) => c.items || c.subcategories?.flatMap((s) => s.items || []) || []);
+  const cats = json.data?.categories || json.data?.data?.categories || [];
+  const items = cats.flatMap((c) => [
+    ...(Array.isArray(c.items) ? c.items : []),
+    ...((c.subcategories || []).flatMap((s) => s.items || [])),
+  ]);
   lastDishes = items.map((i) => ({ ...i, restaurant_id: restaurantId, restaurant_name: restaurantName }));
   const wrap = document.createElement("div");
   wrap.className = "cards";
@@ -217,20 +228,55 @@ async function showMenu(restaurantId, restaurantName) {
   else addMsg("No menu items came back for this restaurant.", "bot");
 }
 
+let confirmBusy = false;
+
+function dishPayload(dish) {
+  return {
+    menu_item_id: dish.menu_item_id || dish.id,
+    id: dish.id,
+    name: dish.name,
+    price: dish.price,
+    hasVariants: dish.hasVariants,
+    hasAddons: dish.hasAddons,
+    variantsV2: dish.variantsV2,
+    variations: dish.variations,
+    inStock: dish.inStock,
+    in_stock: dish.in_stock,
+  };
+}
+
 async function confirmAddToCart(dish) {
+  if (confirmBusy) return;
   if (!authed) { addMsg("⚠️ Sign in with Swiggy first — adding to cart needs your account.", "sys"); return; }
-  if (!location) { addMsg("⚠️ Pick a location/address first.", "sys"); return; }
+  if (!savedPlace?.addressId) { addMsg("⚠️ Pick a saved Swiggy address first. Cart tools need that address id — GPS alone is not enough.", "sys"); return; }
+  if (dish.inStock === 0 || dish.in_stock === false) { addMsg("⚠️ That item is out of stock on Swiggy right now.", "sys"); return; }
   const restaurantId = dish.restaurant_id || dish.restaurantId;
   const restaurantName = dish.restaurant_name || dish.restaurantName || "";
+  if (!restaurantId || !(dish.menu_item_id || dish.id)) { addMsg("⚠️ This dish has no Swiggy item id, so it cannot be added.", "sys"); return; }
+  const variantNote = dish.hasVariants || dish.hasAddons
+    ? " This item has options. The app will use the live menu's default option unless you already picked one."
+    : "";
+  const priceNote = Number(dish.price) > 1000
+    ? " This item's listed price is already over the ₹1000 Builders Club cap."
+    : " Builders Club carts are capped at ₹1000. The live total is checked after the update.";
   const ok = await askConfirm("Add to cart?",
-    `<p>Add <strong>${esc(dish.name)}</strong> (${inr(dish.price)}) from <strong>${esc(restaurantName)}</strong> to your Swiggy cart?</p>
-     <p class="meta">This calls the live <code>update_food_cart</code> tool. Nothing is ordered — the demo stops at the cart.</p>`);
-  if (!ok) return;
-  const { json } = await api("/api/confirm-add", {
-    restaurantId, restaurantName,
-    dish: { menu_item_id: dish.menu_item_id, name: dish.name, variantsV2: dish.variantsV2, variations: dish.variations },
-    quantity: 1,
-  });
+    `<p>Add <strong>${esc(dish.name)}</strong> (${inr(dish.price) || "price from Swiggy"}) from <strong>${esc(restaurantName || "this restaurant")}</strong> to your Swiggy cart?</p>
+     <p class="meta">Yes calls the live Food tool <code>update_food_cart</code>, then re-reads the cart with <code>get_food_cart</code>. Cancel sends nothing to Swiggy. No order is placed.</p>
+     <p class="meta">${esc(variantNote + priceNote)}</p>`,
+    "Yes, add to cart");
+  if (!ok) { addMsg("Cancelled. Nothing was sent to Swiggy.", "sys"); return; }
+  confirmBusy = true;
+  let json;
+  try {
+    ({ json } = await api("/api/confirm-add", {
+      confirmed: true,
+      restaurantId, restaurantName,
+      dish: dishPayload(dish),
+      quantity: 1,
+    }));
+  } finally {
+    confirmBusy = false;
+  }
   if (json.toolCalls) renderToolLog(json.toolCalls);
   if (!json.ok) { addMsg("⚠️ " + (json.message || "Could not add to cart."), "sys"); return; }
   addMsg(json.message || "Added to cart.", "bot");
@@ -240,13 +286,13 @@ async function confirmAddToCart(dish) {
 
 // --- dineout slots + booking (confirmation-gated) ---
 async function showSlots(restaurantId, restaurantName) {
-  if (!location || location.latitude == null) { addMsg("⚠️ Table booking needs your coordinates — tap 'Use my location' first.", "sys"); return; }
+  if (!savedPlace || savedPlace.latitude == null) { addMsg("⚠️ Table booking needs your coordinates — tap 'Use my location' first.", "sys"); return; }
   const date = new Date().toISOString().slice(0, 10);
   addMsg(`Checking slots at ${restaurantName} for ${date}…`, "bot");
-  const { json } = await api("/api/dineout/slots", { restaurantId, date, latitude: location.latitude, longitude: location.longitude });
+  const { json } = await api("/api/dineout/slots", { restaurantId, date, latitude: savedPlace.latitude, longitude: savedPlace.longitude });
   if (json.toolCalls) renderToolLog(json.toolCalls);
   if (!json.ok) { addMsg("⚠️ " + (json.message || "Could not load slots."), "sys"); return; }
-  const slots = (json.data?.slots || []).slice(0, 12);
+  const slots = (json.data?.slots || json.data?.data?.slots || []).slice(0, 12);
   if (!slots.length) { addMsg("No slots came back for this restaurant/date.", "bot"); return; }
   const wrap = document.createElement("div");
   wrap.className = "cards";
@@ -271,9 +317,10 @@ async function confirmBookTable({ restaurantId, restaurantName, slot, deal }) {
   const ok = await askConfirm("Book this table?",
     `<p><strong>${esc(restaurantName)}</strong> — ${esc(slot.displayTime)}, ${esc(slot.dateStr || "")}, 2 guests.<br>
      Deal: ${esc(deal.title || "")} — ${isFree ? "FREE reservation" : "PAID prebook " + inr(deal.bookingPrice)}.</p>
-     <p class="meta">This calls the live <code>book_table</code> tool${isFree ? "" : " (paid: via UPI QR after a cart step)"}. A real reservation is created — only confirm if you mean it.</p>`);
-  if (!ok) return;
-  const base = { restaurantId, slotId: slot.slotId, itemId: deal.itemId, reservationTime: slot.reservationTime, guestCount: 2, latitude: location.latitude, longitude: location.longitude };
+     <p class="meta">Yes calls the live Dineout tool <code>book_table</code>${isFree ? "" : " after <code>create_cart</code>"}. A real reservation is created. Cancel sends nothing to Swiggy.</p>`,
+    isFree ? "Yes, book this table" : "Yes, continue");
+  if (!ok) { addMsg("Cancelled. Nothing was sent to Swiggy.", "sys"); return; }
+  const base = { confirmed: true, restaurantId, slotId: slot.slotId, itemId: deal.itemId, reservationTime: slot.reservationTime, guestCount: 2, latitude: savedPlace.latitude, longitude: savedPlace.longitude };
   if (isFree) {
     const { json } = await api("/api/dineout/book", base);
     if (json.toolCalls) renderToolLog(json.toolCalls);
@@ -285,8 +332,10 @@ async function confirmBookTable({ restaurantId, restaurantName, slot, deal }) {
     const cartKey = cartJson.data?.cartKey || cartJson.data?.data?.cartKey;
     addMsg(`Booking summary created (cart ${cartKey || ""}). This is a paid prebook — the next step takes UPI payment via QR.`, "bot");
     const pay = await askConfirm("Proceed to UPI payment?",
-      `<p>Pay ${inr(deal.bookingPrice)} via UPI QR to confirm the booking at <strong>${esc(restaurantName)}</strong>?</p>`);
-    if (!pay) return;
+      `<p>Pay ${inr(deal.bookingPrice)} via UPI QR to confirm the booking at <strong>${esc(restaurantName)}</strong>?</p>
+       <p class="meta">Yes calls <code>book_table</code> with UPI. Cancel leaves the reservation unpaid.</p>`,
+      "Yes, continue to UPI");
+    if (!pay) { addMsg("Stopped before payment. No UPI booking call was sent.", "sys"); return; }
     const { json } = await api("/api/dineout/book", { ...base, paymentMethod: "UPI", cartKey });
     if (json.toolCalls) renderToolLog(json.toolCalls);
     if (json.ok && json.data?.status === "PENDING_PAYMENT") {
@@ -327,7 +376,7 @@ $("cartBtn").onclick = async () => {
 $("clearLogBtn").onclick = () => { toolLogEl.innerHTML = '<p class="empty">Log cleared.</p>'; };
 
 refreshStatus();
-if (new URLSearchParams(location.search).get("auth") === "ok") {
+if (new URLSearchParams(window.location.search).get("auth") === "ok") {
   addMsg("✅ Signed in with Swiggy — your token stays in this browser only. Try 'biryani near me'.", "sys");
 }
 addMsg("Hi! I'm the Setuware AI Commerce Assistant, running on live Swiggy MCP. Sign in with Swiggy (top-right), then ask me for food ('biryani near me') or a table ('book a table for 2 tonight'). Everything I show comes from Swiggy's real servers — nothing here is mocked.", "bot");

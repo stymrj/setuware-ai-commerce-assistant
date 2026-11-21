@@ -1,35 +1,130 @@
 # Setuware AI Commerce Assistant
 
 Chat UI on the **live Swiggy MCP servers** (Food + Dineout) — built for the
-Swiggy Builders Club application. No mock data anywhere: every restaurant,
-dish, price, slot and cart total comes from `mcp.swiggy.com`.
+Swiggy Builders Club application. The running app has no mock mode: every
+restaurant, dish, price, slot and cart total comes from `mcp.swiggy.com`.
 
-## What it does
+## For Swiggy Builders Club reviewers
 
-- **Chat surface** — ask for food (`biryani near me`) or a table
-  (`book a table for 2 tonight`).
-- **Visible tool-call log** — every real MCP call, with server, tool name,
-  arguments, timing and result summary, in a panel next to the chat.
-  This is what Swiggy asked to see in the demo.
-- **Discovery** — `search_restaurants` + `search_menu` on the live Food
-  server; restaurant menu via `get_restaurant_menu`.
-- **Cart, confirmation-gated** — tapping "Add to cart" shows a summary and
-  only calls `update_food_cart` after you tap Confirm; the cart is then
-  re-read with `get_food_cart` and shown. The ₹1000 Builders Club cap is
-  checked and warned about.
-- **Table booking, confirmation-gated** — `search_restaurants_dineout` →
-  `get_available_slots` → `book_table` (free deals book directly; paid
-  prebook deals go `create_cart` → UPI QR → `book_table`, and confirm only
-  after you pay in your UPI app).
-- **Deliberately NOT included:** `place_food_order` is not wired up at all.
-  The demo stops at the confirmed cart — no order is ever placed, no money
-  moves from this app.
+This is the localhost path. A fresh clone talks to the real Swiggy MCP
+servers. `npm test` is separate: it uses an in-process fake MCP server and
+does not contact Swiggy.
+
+### What it does
+
+A single-page chat for food discovery and table booking.
+
+- Search and menus call the live Food server (`search_restaurants`,
+  `search_menu`, `get_restaurant_menu`).
+- The panel on the right lists every MCP call with server, tool name,
+  arguments, timing, and a short result summary.
+- **Add to cart is confirmation-gated.** The app shows the dish, restaurant,
+  and price, and names the tool it is about to call. **Yes, add to cart**
+  calls `update_food_cart`, then re-reads the cart with `get_food_cart`.
+  **Cancel** does not send that request. The server rejects the cart route
+  unless the request includes `confirmed: true`, which the page sets only
+  after Yes.
+- **Table booking is confirmation-gated the same way** (`book_table`, and
+  `create_cart` for a paid prebook). That creates a real reservation.
+- **`place_food_order` is not called.** The food demo stops at the confirmed
+  cart. No food order is placed and no payment is taken for food. The ₹1000
+  Builders Club cap is checked on the live cart total and warned about.
+
+### Who will use it first
+
+TODO (Satyam): write who the first user is before this goes back to Swiggy
+for review.
+
+### Where we plan to ship
+
+TODO (Satyam): write where this will ship before this goes back to Swiggy
+for review.
+
+### Prerequisites
+
+- Node.js 18 or newer (`node -v`). No database and no npm packages.
+- A browser on the same machine.
+- Outbound HTTPS to `mcp.swiggy.com`.
+- A Swiggy account that can receive the phone OTP. That login is the only
+  credential. There is no Swiggy API key to put in `.env`.
+
+### Setup
+
+```bash
+git clone https://github.com/stymrj/setuware-ai-commerce-assistant.git
+cd setuware-ai-commerce-assistant
+npm install
+cp .env.example .env
+```
+
+`npm install` only checks the lockfile (zero dependencies). Copying
+`.env.example` is optional: every variable in it is optional, and `npm start`
+still works if you skip the copy. Do not put real tokens in `.env`.
+
+### How to run
+
+```bash
+npm start
+```
+
+Open **http://localhost:3000**. Use `localhost`, not a LAN IP. The OAuth
+redirect Swiggy expects for local dev is `http://localhost:3000/auth/callback`
+(or whatever `PORT` you set). Leave `BASE_URL` unset for a local run.
+
+Then:
+
+1. Click **Sign in with Swiggy**.
+2. Complete phone + OTP on Swiggy's page. This app never sees the phone
+   number or the OTP.
+3. You land back on the chat, signed in. The page loads your saved addresses
+   with `get_addresses` and selects the default. The food cart needs that
+   saved address. Table booking also needs **Use my location** (Dineout
+   slots require coordinates).
+
+Tokens are written to `.swiggy-tokens.json` (mode 0600, gitignored). Sign out
+from the header when you are done.
+
+Optional checks that do not place an order:
+
+```bash
+npm test             # local tests only; does not call Swiggy
+npm run verify-live  # unauthenticated calls against the real servers (expects 401) plus dynamic client registration. Does not sign in and does not mutate a cart.
+```
+
+### Demo walkthrough
+
+Do this while watching the **Live MCP tool calls** panel.
+
+| Step | What you do | Live calls |
+| --- | --- | --- |
+| 1. Sign in | **Sign in with Swiggy**, then OTP on Swiggy's page | `POST https://mcp.swiggy.com/auth/register`, browser navigation to `GET /auth/authorize`, then `POST /auth/token` |
+| 2. Address | Automatic after sign-in | Food `initialize`, then `get_addresses` |
+| 3. Search | Send `biryani near me` | Food `search_restaurants`, then `search_menu` |
+| 4. Menu | **See menu** on a restaurant | Food `get_restaurant_menu` |
+| 5. Confirm the cart | **Add to cart** on a dish. Read the dialog. Click **Yes, add to cart**. Click **Cancel** once first if you want to see that nothing is sent. | After Yes only: `get_food_cart`, `update_food_cart`, `get_food_cart`. A dish opened from the compact menu may also call `search_menu` first so variant ids match what Swiggy expects. |
+| 6. Cart total | The cart card shows the live total. Over ₹1000 is called out. **View my cart** reads it again. | Food `get_food_cart` |
+| 7. Table (optional) | **Use my location**, then `book a table for 2 tonight`. Pick a place, **Check slots**, **Book this slot**, then confirm. | Dineout `search_restaurants_dineout`, `get_available_slots`, then `book_table`. A paid prebook calls `create_cart` first and asks again before UPI. |
+
+Food ordering stops at step 6. There is no button that places the order.
+
+### If something fails before a tool call
+
+| What you see | What to do |
+| --- | --- |
+| "Sign in with Swiggy first" | Search and cart both require a signed-in session. Unauthenticated `initialize` returns HTTP 401. |
+| Sign-in bounces or says the redirect URI is wrong | Open `http://localhost:<PORT>` and leave `BASE_URL` empty. |
+| "Pick a saved Swiggy address" | The address dropdown is filled from `get_addresses`. The account needs at least one saved Swiggy address. GPS alone cannot build the food cart. |
+| Table slots ask for coordinates | Click **Use my location** and allow the browser prompt. |
+| Cart update errors on a dish with options | Add the dish from the search cards (those include variant ids). The menu page retries via `search_menu` when the compact row has no variant payload. |
 
 ## Run it
 
+The reviewer steps above are the supported local run. Short form:
+
 ```bash
-npm install   # zero dependencies — Node 18+ built-ins only
-npm start     # http://localhost:3000
+npm install          # zero dependencies — Node 18+ built-ins only
+cp .env.example .env # optional; no secrets
+npm start            # http://localhost:3000
 ```
 
 ## Deploy it (Vercel, public URL)
@@ -99,14 +194,10 @@ mid-call. See `verification/live-check.json` for the recorded responses.
 | 2. Discovery | 0:30–2:00 | `biryani near me` → watch the tool-call log fill with `search_restaurants` + `search_menu` (real args visible), restaurant + dish cards from live data |
 | 3. Cart | 2:00–3:30 | Tap a dish → **Add to cart** → confirmation card → Confirm → `update_food_cart` + `get_food_cart` appear in the log, cart shown with live total |
 | 4. Action step | 3:30–4:30 | `book a table for 2 tonight` → `search_restaurants_dineout` → pick a place → `get_available_slots` → pick a slot → Confirm → `book_table` (free deal) |
-| 5. First user / ship plan | 4:30–5:00 | Say who uses it first and where it ships (see below) |
+| 5. First user / ship plan | 4:30–5:00 | Read the two TODO sections above only after Satyam has filled them in. Do not invent this on camera. |
 
-One continuous take if possible; no mock data in frame — there is none in
-the app.
-
-**First user / ship plan — Satyam to decide (not yet answered):**
-- First user: [himself / first users — his call]
-- Ship it: [where — his call]
+One continuous take if possible. The running app has no mock data. `npm test`
+is the only place a fake MCP server exists, and it never starts with `npm start`.
 
 ## Tool catalog used (from the live docs, 2026-11-20)
 
@@ -148,7 +239,7 @@ lib/mcp.js           # Streamable-HTTP JSON-RPC client (JSON + SSE parsing)
 lib/auth.js          # OAuth 2.1 + PKCE, DCR, token exchange/refresh, cookie + file stores
 lib/router.js        # keyword router + optional LLM router (read-only tools only)
 public/              # index.html, app.js, style.css — chat UI + tool-call log
-test/                # node:test suite (mock MCP server + router + Vercel path; no live calls)
+test/                # node:test only. A local fake MCP server lives here and is never used by npm start.
 scripts/verify-live.mjs  # live endpoint check (no auth, no mutations)
 verification/live-check.json  # recorded live responses
 ```
@@ -156,12 +247,18 @@ verification/live-check.json  # recorded live responses
 ## Tests & verification
 
 ```bash
-npm test          # 21 tests, all passing (mock MCP server + router + Vercel/cookie path)
+npm test          # 28 tests, all local (fake MCP + router + confirmation gate + Vercel/cookie path). No live Swiggy calls.
 npm run verify-live  # real endpoints: 401s without auth, DCR 201, authorize URL generated
 ```
 
 ## Known limits
 
+- `place_food_order` is intentionally not wired. Reviewers can confirm a cart
+  update (and, optionally, a table booking). They cannot place a food order
+  from this app.
+- The food cart needs a saved Swiggy address (`get_addresses`). An account
+  with no saved address cannot complete the cart step. Browser GPS is only
+  the location input for Dineout.
 - Search needs sign-in too (verified live — see above), even though the
   docs describe coordinates as usable for "guest" calls; the transport
   still requires a Bearer token.

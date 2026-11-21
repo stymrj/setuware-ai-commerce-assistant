@@ -2,7 +2,7 @@
 // No network, no LLM key needed.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { routeMessage, extractQuery, buildCartItem } = require("../lib/router");
+const { routeMessage, extractQuery, buildCartItem, normalizeDish, dishNeedsMenuDetails, MUTATING_TOOLS } = require("../lib/router");
 
 const LOC = { addressId: "addr_1", latitude: 28.61, longitude: 77.2 };
 
@@ -75,4 +75,27 @@ test("buildCartItem keeps the item's own variant format — never both", () => {
 
 test("buildCartItem throws without a menu_item_id", () => {
   assert.throws(() => buildCartItem({ name: "No id dish" }), /menu_item_id/);
+});
+
+test("normalizeDish accepts get_restaurant_menu's id as menu_item_id", () => {
+  const dish = normalizeDish({ id: "item_9", name: "Paneer", hasVariants: true });
+  assert.equal(dish.menu_item_id, "item_9");
+  assert.equal(buildCartItem(dish).menu_item_id, "item_9");
+  assert.equal(dishNeedsMenuDetails(dish), true);
+  assert.equal(dishNeedsMenuDetails({ menu_item_id: "m", variations: [{ id: "v", groupId: "g" }] }), false);
+});
+
+test("the keyword router never selects a mutating tool", () => {
+  const messages = [
+    "add biryani to my cart",
+    "place my order",
+    "order biryani now",
+    "book a table for 2 tonight",
+    "checkout",
+    "apply a coupon",
+  ];
+  for (const message of messages) {
+    const routed = routeMessage(message, { location: LOC });
+    assert.equal(MUTATING_TOOLS.has(routed.tool), false, `${message} -> ${routed.tool}`);
+  }
 });

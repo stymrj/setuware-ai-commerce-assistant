@@ -18,16 +18,24 @@
 // Safety rails (from the Swiggy docs):
 // - place_food_order is NOT exposed at all in this build (demo stops at the
 //   confirmed cart — no order is ever placed, no money moves).
-// - update_food_cart / book_table run ONLY after an explicit Confirm tap.
-// - Builders Club ₹1000 cart cap is enforced before any cart confirmation.
+// - update_food_cart / book_table / create_cart run ONLY after an explicit
+//   Confirm tap. The mutation routes reject a body that is not confirmed:true,
+//   and the UI sets that flag only after the dialog returns Yes.
+// - Builders Club ₹1000 cart cap is checked on the live get_food_cart total
+//   after an update. Over-cap carts are warned about. Nothing is ordered.
 // - Mutations are never retried. A failed mutation is reported, not re-sent.
+// - There is no mock mode on this server. Tests stub MCP on localhost only.
 
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const { loadEnvFile } = require("./lib/load-env");
 const { McpClient, McpError } = require("./lib/mcp");
 const auth = require("./lib/auth");
-const { routeMessage, buildCartItem, llmRoute } = require("./lib/router");
+const { routeMessage, buildCartItem, normalizeDish, dishNeedsMenuDetails, llmRoute } = require("./lib/router");
+
+// Optional. Does not override variables already set in the environment.
+const envFile = loadEnvFile(path.join(__dirname, ".env"));
 
 const PORT = Number(process.env.PORT || 3000);
 const CART_CAP_INR = 1000; // Swiggy v1: hard ₹1000 cap on Builders Club orders
@@ -44,13 +52,22 @@ const CART_CAP_INR = 1000; // Swiggy v1: hard ₹1000 cap on Builders Club order
 /** Base URL for this request. BASE_URL wins when set; otherwise derive it
  * from the proxy headers (Vercel) or the Host header, so the OAuth
  * redirect_uri is automatically https://<public-domain>/auth/callback. */
+/** Map 127.0.0.1 and ::1 onto localhost so the OAuth redirect_uri stays on the
+ * exact http://localhost origin Swiggy allowlists for local development. */
+function normalizeLoopbackHost(host) {
+  const value = String(host || "").split(",")[0].trim();
+  const match = value.match(/^(?:\[::1\]|127\.0\.0\.1|localhost)(?::(\d+))?$/);
+  if (!match) return value;
+  return `localhost:${match[1] || PORT}`;
+}
+
 function deriveBaseUrl(req) {
   if (process.env.BASE_URL) return process.env.BASE_URL.replace(/\/$/, "");
   const proto =
     (req.headers["x-forwarded-proto"] || "").split(",")[0].trim() ||
     (req.socket && req.socket.encrypted ? "https" : "http");
   const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
-  return `${proto}://${host}`;
+  return `${proto}://${normalizeLoopbackHost(host)}`;
 }
 
 function makeCtx(req) {
@@ -137,13 +154,35 @@ async function callLogged(ctx, server, tool, args) {
   }
 }
 
+/** get_food_cart's documented payload is { data: { items, pricing, restaurant }, addressId }.
+ * Some callers also see the inner object already unwrapped. Accept both. */
+function cartView(data) {
+  if (!data || typeof data !== "object") return {};
+  const inner = data.data;
+  if (inner && typeof inner === "object" && (inner.items || inner.pricing || inner.restaurant || inner.cart_id)) {
+    return inner;
+  }
+  if (data.items || data.pricing || data.restaurant) return data;
+  return {};
+}
+
+function listFrom(data, key) {
+  if (!data || typeof data !== "object") return [];
+  if (Array.isArray(data[key])) return data[key];
+  if (data.data && Array.isArray(data.data[key])) return data.data[key];
+  return [];
+}
+
 function summarize(tool, data) {
   if (!data || typeof data !== "object") return "";
-  if (data.restaurants) return `${data.restaurants.length} restaurants`;
-  if (data.items) return `${data.items.length} items`;
-  if (data.addresses) return `${data.addresses.length} addresses`;
-  if (data.slots) return `${data.slots.length} slots`;
-  if (data.data && data.data.items) return `${data.data.items.length} items in cart, to pay ₹${data.data.pricing?.to_pay ?? "?"}`;
+  if (data.restaurants || data.data?.restaurants) return `${listFrom(data, "restaurants").length} restaurants`;
+  if (tool === "get_food_cart" || tool === "update_food_cart") {
+    const cart = cartView(data);
+    if (cart.items) return `${cart.items.length} items in cart, to pay ₹${cart.pricing?.to_pay ?? "?"}`;
+  }
+  if (data.items || data.data?.items) return `${listFrom(data, "items").length} items`;
+  if (data.addresses || data.data?.addresses) return `${listFrom(data, "addresses").length} addresses`;
+  if (data.slots || data.data?.slots) return `${listFrom(data, "slots").length} slots`;
   if (data.orderId) return `order ${data.orderId}`;
   if (data.booking) return `booking ${data.booking.orderId || data.booking.id || ""}`;
   return data.message || "";
@@ -258,7 +297,8 @@ async function handleChat(ctx, body) {
   const toolCalls = [];
   const run = async (server, tool, args) => {
     const { data, ms } = await callLogged(ctx, server, tool, args);
-    toolCalls.push({ server, tool, args, ms, status: "ok" });
+    const entry = state.toolLog[state.toolLog.length - 1];
+    toolCalls.push({ server, tool, args, ms, status: "ok", summary: entry?.summary || summarize(tool, data) });
     return data;
   };
 
@@ -267,12 +307,12 @@ async function handleChat(ctx, body) {
 
   if (route.intent === "discover") {
     const data = await run(route.server, route.tool, route.args);
-    const restaurants = (data.restaurants || []).filter((r) => r);
+    const restaurants = listFrom(data, "restaurants").filter((r) => r);
     state.lastRestaurants = restaurants.slice(0, 10);
     let dishes = [];
     try {
       const menuData = await run(route.followUp.server, route.followUp.tool, route.followUp.args);
-      dishes = menuData.items || [];
+      dishes = listFrom(menuData, "items");
       state.lastDishes = dishes.slice(0, 20);
     } catch (e) {
       // search_menu failing must not hide the restaurant results.
@@ -286,7 +326,7 @@ async function handleChat(ctx, body) {
     cards = { type: "discover", restaurants: restaurants.slice(0, 8), dishes: dishes.slice(0, 8) };
   } else if (route.intent === "cart") {
     const data = await run("food", "get_food_cart", route.args);
-    const cart = data.data || {};
+    const cart = cartView(data);
     const items = cart.items || [];
     reply = items.length
       ? `Your cart at ${cart.restaurant?.name || "Swiggy"}: ${items.map((i) => `${i.quantity}× ${i.name}`).join(", ")}. To pay: ₹${cart.pricing?.to_pay ?? "?"}.`
@@ -294,7 +334,7 @@ async function handleChat(ctx, body) {
     cards = { type: "cart", cart };
   } else if (route.intent === "dineout_search") {
     const data = await run("dineout", "search_restaurants_dineout", route.args);
-    const restaurants = data.restaurants || data.data?.restaurants || [];
+    const restaurants = listFrom(data, "restaurants");
     state.lastDineout = restaurants.slice(0, 10);
     reply = restaurants.length
       ? `Found ${restaurants.length} places to book a table. Pick one and I'll show its available slots.`
@@ -303,8 +343,11 @@ async function handleChat(ctx, body) {
   } else {
     const data = await run(route.server, route.tool, route.args);
     if (route.tool === "get_restaurant_menu") {
-      const cats = data.categories || [];
-      const items = cats.flatMap((c) => c.items || c.subcategories?.flatMap((s) => s.items || []) || []);
+      const cats = data.categories || data.data?.categories || [];
+      const items = cats.flatMap((c) => [
+        ...(Array.isArray(c.items) ? c.items : []),
+        ...((c.subcategories || []).flatMap((s) => s.items || [])),
+      ]);
       state.lastDishes = items.slice(0, 20);
       reply = `Menu: ${cats.length} categories, ${items.length} items shown. Tap a dish to add it — I'll confirm first.`;
       cards = { type: "menu", categories: cats.slice(0, 10), items: items.slice(0, 12) };
@@ -368,7 +411,9 @@ async function handleRequest(req, res) {
     if (req.method === "GET" && p === "/api/addresses") {
       if (!authed(ctx)) return sendJson(res, 401, { ok: false, error: "AUTH_REQUIRED", message: "Sign in first." }, ctx);
       const { data } = await callLogged(ctx, "food", "get_addresses", {});
-      return sendJson(res, 200, { ok: true, ...data }, ctx);
+      const addresses = listFrom(data, "addresses");
+      const resolution = data.resolution || data.data?.resolution || null;
+      return sendJson(res, 200, { ok: true, addresses, resolution, toolCalls: state.toolLog.slice(-1) }, ctx);
     }
 
     if (req.method === "POST" && p === "/api/chat") {
@@ -388,48 +433,100 @@ async function handleRequest(req, res) {
     if (req.method === "POST" && p === "/api/cart") {
       if (!state.location?.addressId) return sendJson(res, 400, { ok: false, error: "NO_ADDRESS", message: "Pick a saved address first (sign in, then choose an address)." }, ctx);
       const { data } = await callLogged(ctx, "food", "get_food_cart", { addressId: state.location.addressId });
-      return sendJson(res, 200, { ok: true, cart: data.data || {}, toolCalls: state.toolLog.slice(-1) }, ctx);
+      return sendJson(res, 200, { ok: true, cart: cartView(data), toolCalls: state.toolLog.slice(-1) }, ctx);
     }
 
-    // Confirmation-gated add to cart. The UI only calls this after the user
-    // taps Confirm on a summary card. Never called by the router.
+    // Confirmation-gated add to cart. The UI calls this only after the user
+    // taps Confirm. The router never calls a mutation. Cancel does not hit
+    // this route. `confirmed: true` is required so a request that skipped the
+    // dialog is rejected before any Swiggy call.
     if (req.method === "POST" && p === "/api/confirm-add") {
       const body = await readBody(req);
+      if (body.confirmed !== true) {
+        return sendJson(res, 400, {
+          ok: false,
+          error: "CONFIRMATION_REQUIRED",
+          message: "Adding to the cart calls the live update_food_cart tool. Confirm in the dialog first — Cancel sends nothing to Swiggy.",
+        }, ctx);
+      }
       if (!authed(ctx)) return sendJson(res, 401, { ok: false, error: "AUTH_REQUIRED", message: "Sign in with Swiggy first." }, ctx);
-      if (!body.restaurantId || !body.dish || !body.dish.menu_item_id) {
-        return sendJson(res, 400, { ok: false, error: "BAD_REQUEST", message: "restaurantId and a dish with menu_item_id are required." }, ctx);
-      }
-      const addressId = state.location?.addressId;
-      if (!addressId && (state.location?.latitude == null)) {
-        return sendJson(res, 400, { ok: false, error: "NO_LOCATION", message: "Pick a saved address first." }, ctx);
-      }
-      // Read the live cart first (docs: read the cart before every mutation).
-      let current = null;
+      let dish;
       try {
-        const c = await callLogged(ctx, "food", "get_food_cart", addressId ? { addressId } : { latitude: state.location.latitude, longitude: state.location.longitude });
-        current = c.data?.data || null;
-      } catch { /* empty cart is fine */ }
-      const existing = (current?.items || []).map((i) => ({
-        menu_item_id: i.menu_item_id,
-        quantity: i.quantity,
-        ...(i.variants?.length ? { variants: i.variants } : {}),
-        ...(i.addons?.length ? { addons: i.addons } : {}),
-      }));
-      const item = buildCartItem(body.dish, Number(body.quantity) || 1);
+        dish = normalizeDish(body.dish);
+      } catch (e) {
+        return sendJson(res, 400, { ok: false, error: "BAD_REQUEST", message: body.restaurantId ? e.message : "restaurantId and a dish are required." }, ctx);
+      }
+      if (!body.restaurantId) {
+        return sendJson(res, 400, { ok: false, error: "BAD_REQUEST", message: "restaurantId and a dish are required." }, ctx);
+      }
+      if (dish.inStock === 0 || dish.in_stock === false) {
+        return sendJson(res, 400, { ok: false, error: "OUT_OF_STOCK", message: `${dish.name || "That item"} is out of stock on Swiggy right now.` }, ctx);
+      }
+      // get_food_cart requires addressId. GPS alone is not enough for the cart tools.
+      const addressId = state.location?.addressId;
+      if (!addressId) {
+        return sendJson(res, 400, { ok: false, error: "NO_ADDRESS", message: "Pick a saved Swiggy address first (sign in, then choose one in the bar). Cart tools need that address id." }, ctx);
+      }
+      // Compact get_restaurant_menu rows omit variant ids. Swiggy's docs say to
+      // order from search_menu, which returns the format update_food_cart expects.
+      const logStart = state.toolLog.length;
+      if (dishNeedsMenuDetails(dish)) {
+        const { data: menuData } = await callLogged(ctx, "food", "search_menu", {
+          query: dish.name,
+          restaurantIdOfAddedItem: body.restaurantId,
+          addressId,
+        });
+        const items = listFrom(menuData, "items");
+        const match =
+          items.find((item) => item.menu_item_id && item.menu_item_id === dish.menu_item_id) ||
+          items.find((item) => dish.name && item.name === dish.name);
+        if (!match) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: "DISH_NOT_FOUND",
+            message: `Swiggy's menu search did not return variant details for "${dish.name || dish.menu_item_id}". Add it from the search results instead.`,
+            toolCalls: state.toolLog.slice(logStart),
+          }, ctx);
+        }
+        dish = normalizeDish({ ...match, name: match.name || dish.name });
+      }
+      const item = buildCartItem(dish, Number(body.quantity) || 1);
+      // Read the live cart first (docs: read before every mutation). The update
+      // itself sends only the new line, matching Swiggy's order-food recipe —
+      // echoing the current cart back can resend variant ids in the wrong shape
+      // and fail the call.
+      try {
+        await callLogged(ctx, "food", "get_food_cart", { addressId });
+      } catch { /* an empty cart can error; the update still proceeds */ }
       const args = {
         restaurantId: body.restaurantId,
         restaurantName: body.restaurantName || undefined,
-        cartItems: [...existing, item],
-        ...(addressId ? { addressId } : { latitude: state.location.latitude, longitude: state.location.longitude }),
+        cartItems: [item],
+        addressId,
       };
-      const { data } = await callLogged(ctx, "food", "update_food_cart", args);
-      const updated = await callLogged(ctx, "food", "get_food_cart", addressId ? { addressId } : { latitude: state.location.latitude, longitude: state.location.longitude });
-      const cart = updated.data?.data || {};
+      await callLogged(ctx, "food", "update_food_cart", args);
+      let cart = {};
+      try {
+        const updated = await callLogged(ctx, "food", "get_food_cart", { addressId, restaurantName: body.restaurantName || undefined });
+        cart = cartView(updated.data);
+      } catch (e) {
+        return sendJson(res, 200, {
+          ok: true,
+          message: `Swiggy accepted the cart update for ${item.quantity}× ${dish.name}, but re-reading the cart failed: ${e.message}`,
+          cart,
+          toolCalls: state.toolLog.slice(logStart),
+        }, ctx);
+      }
       const toPay = cart.pricing?.to_pay;
       const capNote = typeof toPay === "number" && toPay > CART_CAP_INR
-        ? ` Heads up: ₹${toPay} is over the ₹${CART_CAP_INR} Builders Club cap — remove items before ordering.`
+        ? ` Heads up: ₹${toPay} is over the ₹${CART_CAP_INR} Builders Club cap. This demo does not place the order — remove items before you would check out.`
         : "";
-      return sendJson(res, 200, { ok: true, message: `Added ${item.quantity}× ${body.dish.name} to your cart.${capNote}`, cart, toolCalls: state.toolLog.slice(-2) }, ctx);
+      return sendJson(res, 200, {
+        ok: true,
+        message: `Added ${item.quantity}× ${dish.name} to your Swiggy cart.${capNote} No order was placed.`,
+        cart,
+        toolCalls: state.toolLog.slice(logStart),
+      }, ctx);
     }
 
     // ---- Dineout ----
@@ -460,6 +557,13 @@ async function handleRequest(req, res) {
     // Paid deals go through /api/dineout/create-cart first (see below).
     if (req.method === "POST" && p === "/api/dineout/book") {
       const body = await readBody(req);
+      if (body.confirmed !== true) {
+        return sendJson(res, 400, {
+          ok: false,
+          error: "CONFIRMATION_REQUIRED",
+          message: "Booking a table calls the live book_table tool and creates a real reservation. Confirm in the dialog first — Cancel sends nothing to Swiggy.",
+        }, ctx);
+      }
       if (!authed(ctx)) return sendJson(res, 401, { ok: false, error: "AUTH_REQUIRED", message: "Sign in with Swiggy first." }, ctx);
       const args = {
         restaurantId: body.restaurantId,
@@ -481,6 +585,13 @@ async function handleRequest(req, res) {
 
     if (req.method === "POST" && p === "/api/dineout/create-cart") {
       const body = await readBody(req);
+      if (body.confirmed !== true) {
+        return sendJson(res, 400, {
+          ok: false,
+          error: "CONFIRMATION_REQUIRED",
+          message: "Creating a dineout cart calls the live create_cart tool. Confirm in the dialog first — Cancel sends nothing to Swiggy.",
+        }, ctx);
+      }
       if (!authed(ctx)) return sendJson(res, 401, { ok: false, error: "AUTH_REQUIRED", message: "Sign in with Swiggy first." }, ctx);
       const { data } = await callLogged(ctx, "dineout", "create_cart", {
         cartType: "DEAL_TICKET_PURCHASE",
@@ -553,6 +664,10 @@ async function handleRequest(req, res) {
     return sendJson(res, 405, { ok: false, error: "METHOD_NOT_ALLOWED" }, ctx);
   } catch (err) {
     const { status, body } = errToJson(err);
+    // A failed live call is still a real MCP call. Show it in the tool log.
+    if (err instanceof McpError && state.toolLog.length) {
+      body.toolCalls = [state.toolLog[state.toolLog.length - 1]];
+    }
     return sendJson(res, status, body, ctx);
   }
 }
@@ -563,8 +678,13 @@ if (require.main === module) {
   const startUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
   server.listen(PORT, () => {
     console.log(`Setuware AI Commerce Assistant running at ${startUrl}`);
-    console.log(`Auth: ${auth.hasValidToken() ? "signed in (token stored locally)" : "not signed in — use /auth/login"}`);
+    console.log("Open that URL, then click Sign in with Swiggy (phone + OTP on Swiggy's page).");
+    console.log("There is no mock mode. Cart and table booking each wait for Confirm before calling Swiggy.");
+    console.log(`Auth: ${auth.hasValidToken() ? "signed in (token stored locally)" : "not signed in yet"}`);
     console.log(`Routing: ${process.env.GEMINI_API_KEY ? "Gemini LLM" : process.env.OPENAI_API_KEY ? "OpenAI LLM" : "keyword router (no LLM key)"}`);
+    if (envFile.loaded) {
+      console.log(`Loaded .env (${envFile.keys.length ? envFile.keys.join(", ") : "no new keys; environment already had them"})`);
+    }
   });
 }
 

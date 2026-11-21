@@ -1,5 +1,5 @@
 {
-  "checkedAt": "2026-11-20T13:29:16.998Z",
+  "checkedAt": "2026-11-21T02:47:20.627Z",
   "results": {
     "food_initialize_no_auth": {
       "status": 401,
@@ -27,7 +27,7 @@
     },
     "authorize_url_generated": {
       "ok": true,
-      "url": "https://mcp.swiggy.com/auth/authorize?response_type=code&client_id=swiggy-mcp&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fauth%2Fcallback&code_challenge=u7O1Yi2NYp7nNE35cwxvDPxh_UHoIpHkqQH3MeKCfOA&code_challenge_method=S256&state=SZGWQlF316ySLuEfbgm0Uw&scope=mcp%3Atools",
+      "url": "https://mcp.swiggy.com/auth/authorize?response_type=code&client_id=swiggy-mcp&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fauth%2Fcallback&code_challenge=ZaF62kamBx-MB64cU9kB5XmRkcaWEP-EV5j5WjE08gM&code_challenge_method=S256&state=3nq9eD8mjyrxVReg-XUr5A&scope=mcp%3Atools",
       "note": "Generated only — NOT visited. Satyam completes phone + OTP in the browser."
     }
   }
